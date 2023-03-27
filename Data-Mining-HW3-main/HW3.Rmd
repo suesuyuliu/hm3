@@ -1,0 +1,405 @@
+---
+title: "HW3"
+author: "Suyu Liu, Siyuan Liu, Jingru Li"
+date: "2023-03-27"
+output: Rmarkdown
+---
+```{r}
+library(tidyverse)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(rsample) 
+library(randomForest)
+library(lubridate)
+library(modelr)
+library(pdp)
+library(kableExtra)
+library(data.table)
+library(gbm)
+library(ggmap)
+library(rstudioapi)
+library(sjPlot)
+library(glmnet)
+library(mosaic)
+library(osmdata)
+library(caret)
+library(purrr)
+
+```
+
+
+## What causes what?
+
+1.  Because we don't know what causes what. We cannot tell whether more police lead to lower crime or higher crime leads to more police. What we can only say is that there may exist some correlation between police and crime. If we could do an experiment with random assignment pf cops in some place and see the crime rate of that place, we would know if there exists a causation.
+
+2.  They found a natural experiment to isolate the effect and used terrorism alert systems. When there is a high alert, more cops would be placed in the streets, which is unrelated with crime. And the researchers collected the crime data and the related alert situation. In the table, days with the higher alert have lower crimes. The coefficient is statistically significant at the 5% level. And controlling for the METRO ridership reduces the impact of police on crime.
+
+3.  They controlled for the ridership because during the high alert day, if less people are out, there will be fewer opportunities for crime, so the crime will be lower. This effect is not caused by the police. Therefore, we need to control. After controlling, we can capture the relationship of police on crime sorting out the impact of people going out.
+
+4.  The model uses the interaction between distractions and high alert days and estimates whether the effect of high alert day on crime was the same in different districts. The results show that the effect only exists clearly in district 1 and is statistically significant at the 1% level. In other districts, the effect is still negative but very small and statistically insignificant.
+
+## Tree modeling: dengue cases
+
+The model we use as following:
+
+total_cases \~ specific_humidity + tdtr_k + precipitation_amt
+
+First, split into training and testing data.
+
+```{r}
+dengue_split = initial_split(dengue, prop = 0.8)
+dengue_train = training(dengue_split)
+dengue_test = testing(dengue_split)
+```
+
+## CART
+
+1.  Fit the model on the training data and get a big tree.
+
+```{r}
+# regression tree
+#Here, the best cp value is the one that minimize the prediction error RMSE (root mean squared error).
+#The lower the RMSE, the better the model.
+#So, we need choose the best cp value.
+# Fit the model on the training set
+dengue.cart.treemodel = rpart(total_cases ~ specific_humidity + tdtr_k + precipitation_amt,
+                          data=dengue_train,
+                          control = rpart.control(cv=0.0001))
+
+rpart.plot(dengue.cart.treemodel, digits=-5, type=1, extra=1)      
+
+```
+
+2.  Then, based on the 1SE rule, find the best cp and prune the tree.
+
+The best cp:
+
+```{r}
+# find the cp
+printcp(dengue.cart.treemodel)
+plotcp(dengue.cart.treemodel) 
+
+cart.bestcp <- dengue.cart.treemodel$cptable[which.min
+                                             (dengue.cart.treemodel$cptable[,"xerror"]),
+                                             "CP"]
+cart.bestcp
+
+
+```
+
+The the pruned tree:
+
+```{r}
+# prune the tree
+dengue.cart.tree.pruned=prune(dengue.cart.treemodel,cp=cart.bestcp)
+# the pruned tree plot
+rpart.plot(dengue.cart.tree.pruned, digits=-5, type=1, extra=1) 
+
+```
+
+3.  Prediction on the test set.
+
+```{r}
+pred.cart<-predict(dengue.cart.tree.pruned, data=dengue_test)
+
+```
+
+4.  RMSE:
+
+```{r}
+modelr::rmse(dengue.cart.tree.pruned, dengue_test)
+```
+
+5.  Plot the Partial Dependence Plot.
+
+Partial dependence of total cases on specific_humidity:
+
+```{r}
+dengue.cart.tree.pruned %>%
+  partial(pred.var = "specific_humidity") %>%
+  plotPartial(rug = TRUE, train = dengue_test)
+
+```
+
+Partial dependence of total cases on tdtr_k:
+
+```{r}
+dengue.cart.tree.pruned %>%
+  partial(pred.var = "tdtr_k") %>%
+  plotPartial(rug = TRUE, train = dengue_test)
+```
+
+Partial dependence of total cases on precipitation_amt:
+
+```{r}
+dengue.cart.tree.pruned %>%
+  partial(pred.var = "precipitation_amt") %>%
+  plotPartial(rug = TRUE, train = dengue_test)
+```
+
+## Random forests
+
+1.  Fitting Random Forest to the train data set
+
+Shows out-of-bag MSE as a function of the number of trees used:
+
+```{r}
+dengue.forest = randomForest(total_cases ~ specific_humidity + tdtr_k + precipitation_amt,
+                             data=dengue_train,  importance=TRUE, proximity=TRUE,
+                             na.action = na.omit)
+print(dengue.forest)
+```
+
+Shows out-of-bag MSE as a function of the number of trees used:
+
+```{r}
+plot(dengue.forest)
+```
+
+2.  Prediction
+
+```{r}
+pred.forest<-predict(dengue.forest, data=dengue_test)
+```
+
+3.  RMSE on the test set:
+
+```{r}
+modelr::rmse(dengue.forest, dengue_test)
+
+```
+
+4.  Plot the Partial Dependence Plot.
+
+Partial dependence of total cases on specific_humidity:
+
+```{r}
+dengue.forest %>%
+  partial(pred.var = "specific_humidity") %>%
+  plotPartial(rug = TRUE, train = dengue_test)
+```
+
+Partial dependence of total cases on tdtr_k:
+
+```{r}
+dengue.forest %>%
+  partial(pred.var = "tdtr_k") %>%
+  plotPartial(rug = TRUE, train = dengue_test)
+```
+
+Partial dependence of total cases on precipitation_amt:
+
+```{r}
+dengue.forest %>%
+  partial(pred.var = "precipitation_amt") %>%
+  plotPartial(rug = TRUE, train = dengue_test)
+```
+
+## Gradient-boosted trees
+
+1.  Fit the gbm model
+
+```{r}
+dengue.boost=gbm(total_cases ~ specific_humidity + tdtr_k + precipitation_amt,
+                 data=dengue_train, distribution = "gaussian", n.trees = 10000,
+                  shrinkage = 0.01, interaction.depth = 4, cv.folds = 5 )
+
+summary(dengue.boost)
+
+```
+
+2.  Find the best ntree and prune.
+
+ntree:
+
+```{r}
+best.iter=gbm.perf(dengue.boost, method = "cv")
+```
+
+```{r}
+print(best.iter)  #number of trees
+```
+
+Then use the best ntree.
+
+```{r}
+dengue.boost.pruned=gbm(total_cases ~ specific_humidity + tdtr_k + precipitation_amt,
+                 data=dengue_train, distribution = "gaussian", n.trees = best.iter,
+                  shrinkage = 0.01, interaction.depth = 4, cv.folds = 5 )
+
+```
+
+3.  Prediction
+
+Predict on testing data.
+
+```{r}
+pred.boost<-predict(dengue.boost.pruned,dengue_test,n.trees = best.iter)
+```
+
+4.  RMSE:
+
+```{r}
+caret::RMSE(pred.boost,dengue_test$total_cases)
+```
+
+4.  Plot the Partial Dependence Plot
+
+Partial dependence of total cases on specific_humidity:
+
+```{r}
+#Plot of Response variable with specific_humidity variable
+plot(dengue.boost,i="specific_humidity") 
+
+```
+
+Partial dependence of total cases on tdtr_k:
+
+```{r}
+plot(dengue.boost,i="tdtr_k") 
+
+```
+
+Partial dependence of total cases on precipitation_amt:
+
+```{r}
+plot(dengue.boost,i="precipitation_amt") 
+```
+
+## Compare RMSE on the test set:
+
+```{r}
+modelr::rmse(dengue.cart.tree.pruned, dengue_test)
+modelr::rmse(dengue.forest, dengue_test)
+modelr::rmse(dengue.boost.pruned, dengue_test)
+```
+
+Comparing the RMSE, the random forest performs best on the test set with the lowest RMSE.
+
+## Q3: greenbuilding
+```{r}
+#greenbuildings = read.csv(file = "greenbuildings.csv" , header = T)
+green = greenbuildings%>%
+mutate(revenue = Rent*leasing_rate/100)
+
+green_split = initial_split(green, prop=0.8)
+green_train = training(green_split)
+green_test  = testing(green_split)
+
+###tree
+green.tree = rpart(revenue ~ . - CS_PropertyID - Rent - leasing_rate - LEED - Energystar - cluster - net - cd_total_07 - hd_total07,
+                           data=green_train, control = rpart.control(cp = 0.00001))
+yhat_tree = predict(green.tree, newdata = green_test)
+plot(yhat_tree, green.tree$revenue)
+
+###random forest
+green.forest = randomForest(revenue ~ . - CS_PropertyID - Rent - leasing_rate - LEED - Energystar - cluster - net - cd_total_07 - hd_total07,
+                           data=green_train, importance = TRUE, na.action=na.roughfix)
+plot(green.forest)
+
+yhat = predict(green.forest, newdata = green_test)
+plot(yhat, green.forest$revenue)
+
+vi = varImpPlot(green.forest, type=1)
+partialPlot(green.forest, green_test, 'green_rating', las=1)
+
+
+###variable selection
+lm_medium = lm(revenue ~ . - CS_PropertyID - Rent - leasing_rate - LEED - Energystar - cluster - net - cd_total_07 - hd_total07,
+                           data=green_train)
+lm_step = step(lm_medium, 
+			scope=~(.)^2)
+
+getCall(lm_step)
+coef(lm_step)
+
+###gbm
+green_gb <- gbm(revenue ~ . - CS_PropertyID - Rent - leasing_rate - LEED - Energystar - cluster - net - cd_total_07 - hd_total07, data = green_train, distribution = "gaussian", n.trees = 10000, shrinkage = 0.01, interaction.depth = 4)
+gbm.perf(green_gb) 
+
+###RMSE
+modelr::rmse(green.tree, green_test)
+modelr::rmse(green.forest, green_test)
+modelr::rmse(lm_medium, green_test)
+modelr::rmse(lm_step, green_test)
+modelr::rmse(green_gb, green_test)
+
+summary(lm_step)
+```
+
+## Q4 CAhousing
+
+```{r}  
+
+CAmap <- get_map( getbb('california'), source="stamen")
+
+CAhousing_split <- initial_split(CAhousing, 0.8)
+CAhousing_train <- training(CAhousing_split)
+CAhousing_test <- testing(CAhousing_split)
+
+#linear regression model
+CAhousing_line <- lm(medianHouseValue ~ . , data = CAhousing_train)
+
+#CART model
+CAhousing_CART <- rpart(medianHouseValue ~ housingMedianAge + longitude + latitude + totalRooms + totalBedrooms + population + households + medianIncome, data = CAhousing_train, control = rpart.control(cp = 0.002, minsplit=30))
+
+plotcp(CAhousing_CART, main = "Cross-Validated Error Plot for CART") 
+
+cp_1se = function(my_tree) {
+    out = as.data.frame(my_tree$cptable)
+    thresh = min(out$xerror + out$xstd)
+    cp_opt = max(out$CP[out$xerror <= thresh])
+    cp_opt
+} 
+cp_1se(CAhousing_CART)
+prune_1se = function(my_tree) {
+    out = as.data.frame(my_tree$cptable)
+    thresh = min(out$xerror + out$xstd)
+    cp_opt = max(out$CP[out$xerror <= thresh])
+    prune(my_tree, cp=cp_opt)
+}
+
+CAhousing_CART_prune <- prune_1se(CAhousing_CART) 
+
+#random forest
+CAhousing_rf <- randomForest(medianHouseValue ~ housingMedianAge + longitude + latitude + totalRooms + totalBedrooms + population + households + medianIncome, data = CAhousing_train, importance = TRUE, na.action=na.omit)
+
+plot(CAhousing_rf, main = "Out-of-Bag MSE for Random Forest")
+
+#Gradient Boosting trees
+CAhousing_gb <- gbm(medianHouseValue ~ housingMedianAge + longitude + latitude + totalRooms + totalBedrooms + population + households + medianIncome, data = CAhousing_train, distribution = "gaussian", n.trees = 10000, shrinkage = 0.01, interaction.depth = 4)
+
+
+gbm.perf(CAhousing_gb) 
+problem1_rmse <- c("Linear Model" = modelr::rmse(CAhousing_line, CAhousing_test),
+                "CART" = modelr::rmse(CAhousing_CART, CAhousing_test),
+                "CART Pruned" = modelr::rmse(CAhousing_CART_prune, CAhousing_test),
+                "Random Forest" = modelr::rmse(CAhousing_rf, CAhousing_test),
+                "Gradient Boosting" = modelr::rmse(CAhousing_gb, CAhousing_test))
+kable(problem1_rmse, col.names = c("RMSE"), caption = "RMSE for each model") %>%
+    kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+```{r} 
+#a plot of the original data
+CAmap <- get_map( getbb('california'), source="stamen")
+
+CA_ggmap <- ggmap(CAmap) + geom_point(aes(x = longitude, y = latitude, color = medianHouseValue), data = CAhousing, alpha = .3) + labs(x = 'longitude', y = 'latitude', title = "Median House Value Original Data", subtitle = '')
+CA_ggmap
+```
+
+```{r} 
+#a plot of your model's predictions of medianHouseValue
+#gradient boosting
+CA_with_prediction <- CAhousing %>% mutate(p_MedianHouseValue = predict.gbm(CAhousing_gb, newdata = CAhousing))
+ggmap(CAmap) + geom_point(aes(x = longitude, y = latitude, color = p_MedianHouseValue), data = CA_with_prediction, alpha = .3) + labs(x = 'longitude', y = 'latitude', title = "Predicted Median House Value", subtitle = '')
+```
+
+```{r} 
+#a plot of your model's errors/residuals
+CA_with_prediction <- CA_with_prediction %>% mutate(resid = medianHouseValue - p_MedianHouseValue)
+ggmap(CAmap) + geom_point(aes(x = longitude, y = latitude, color = resid), data = CA_with_prediction, alpha = .3) + labs(x = 'longitude', y = 'latitude', title = "Plot of Errors", subtitle = '')
+```
